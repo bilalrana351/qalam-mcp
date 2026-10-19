@@ -60,6 +60,18 @@ def restore_cookies(cookies: list[dict]) -> httpx.Cookies:
     return jar
 
 
+FEEDBACK_PATH = "/student/qa/feedback"
+
+
+def feedback_required() -> QalamError:
+    return QalamError(
+        "FEEDBACK_REQUIRED",
+        "Qalam blocks every student page until pending QA feedback is submitted. Ask the user to "
+        f"complete it at {ORIGIN}{FEEDBACK_PATH} in a browser, then retry. The saved session "
+        "stays valid; no new login is needed.",
+    )
+
+
 def validate_url(url: str) -> None:
     parsed = urlsplit(url)
     if (
@@ -108,6 +120,9 @@ class QalamClient:
                 ) from exc
             if response.is_redirect:
                 url = urljoin(str(response.url), response.headers.get("location", ""))
+                # Feedback forms are surveys; this server never opens or fills them.
+                if urlsplit(url).path.rstrip("/") == FEEDBACK_PATH:
+                    raise feedback_required()
                 if response.status_code in (301, 302, 303):
                     method, data = "GET", None
                 # Never forward a password through 307/308 redirects, even within the origin.
@@ -141,7 +156,7 @@ class QalamClient:
             raise QalamError(
                 "AUTH_REQUIRED",
                 "Your Qalam session expired. Run qalam-mcp login, or ask the user "
-                "for credentials and call qalam_login. Passwords are not saved.",
+                "for credentials and call nust_login. Passwords are not saved.",
             )
         if not parsers.is_student_page(response.text):
             raise QalamError(
@@ -155,7 +170,7 @@ class QalamClient:
                 raise QalamError(
                     "AUTH_REQUIRED",
                     "Sign in once using qalam-mcp login, or ask the user for "
-                    "credentials and call qalam_login. All agents share the saved session.",
+                    "credentials and call nust_login. All agents share the saved session.",
                 )
             if self.cdp_url:
                 from .browser_auth import browser_read
@@ -179,7 +194,7 @@ class QalamClient:
                 "ok": True,
                 "authenticated": False,
                 "reason": "No saved session.",
-                "next_step": "Run qalam-mcp login, or call qalam_login with user credentials.",
+                "next_step": "Run qalam-mcp login, or call nust_login with user credentials.",
             }
         result = {
             "ok": True,
@@ -192,9 +207,12 @@ class QalamClient:
                 self._get("/student/dashboard")
                 result["authenticated"] = True
             except QalamError as exc:
-                if exc.code != "AUTH_REQUIRED":
+                if exc.code == "FEEDBACK_REQUIRED":
+                    result.update(authenticated=True, action_required=str(exc))
+                elif exc.code == "AUTH_REQUIRED":
+                    result.update(authenticated=False, reason=str(exc))
+                else:
                     raise
-                result.update(authenticated=False, reason=str(exc))
         else:
             result.update(authenticated=None, note="Saved session exists; validity not checked.")
         return result
@@ -211,26 +229,33 @@ class QalamClient:
                     raise QalamError(
                         "PORTAL_CHANGED", "Login CSRF token not found. Use browser login."
                     )
-                # Fixed destination keeps credentials away from page-supplied form actions.
-                response = self._request(
-                    client,
-                    "/web/login",
-                    method="POST",
-                    data={
-                        "csrf_token": field["value"],
-                        "login": username.strip(),
-                        "password": password,
-                        "redirect": "/student/dashboard",
-                    },
-                )
-                if parsers.page_state(response.text) == "login":
-                    raise QalamError(
-                        "LOGIN_FAILED",
-                        "Qalam did not accept the login, or requires another "
-                        "authentication step. Check credentials or use qalam-mcp login --browser.",
+                blocked = None
+                try:
+                    # Fixed destination keeps credentials away from page-supplied form actions.
+                    response = self._request(
+                        client,
+                        "/web/login",
+                        method="POST",
+                        data={
+                            "csrf_token": field["value"],
+                            "login": username.strip(),
+                            "password": password,
+                            "redirect": "/student/dashboard",
+                        },
                     )
-                response = self._request(client, "/student/dashboard")
-                self._require_student(response)
+                    if parsers.page_state(response.text) == "login":
+                        raise QalamError(
+                            "LOGIN_FAILED",
+                            "Qalam did not accept the login, or requires another authentication "
+                            "step. Check credentials or use qalam-mcp login --browser.",
+                        )
+                    response = self._request(client, "/student/dashboard")
+                    self._require_student(response)
+                except QalamError as exc:
+                    # The feedback gate is only reachable with accepted credentials.
+                    if exc.code != "FEEDBACK_REQUIRED":
+                        raise
+                    blocked = exc
                 self.store.write(
                     {
                         "cookies": cookie_state(client.cookies),
@@ -239,6 +264,13 @@ class QalamClient:
                         "user_agent": client.headers["User-Agent"],
                     }
                 )
+        if blocked:
+            return {
+                "ok": True,
+                "authenticated": True,
+                "username": username.strip(),
+                "action_required": str(blocked),
+            }
         return {
             "ok": True,
             "authenticated": True,

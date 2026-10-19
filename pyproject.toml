@@ -1,11 +1,12 @@
 [project]
 name = "qalam-mcp"
 version = "0.1.0"
-description = "A personal, reusable-session MCP server for NUST Qalam attendance and grades"
+description = "A personal, reusable-session MCP server for NUST Qalam and the NUST LMS"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4>=4.14,<5",
+    "certifi>=2024.2",
     "filelock>=3.20,<4",
     "httpx>=0.28,<1",
     "mcp>=1.26,<2",

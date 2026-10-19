@@ -7,9 +7,11 @@ import secrets
 import sys
 from pathlib import Path
 
+from . import auth
 from .client import QalamClient
 from .errors import QalamError
-from .session import SessionStore
+from .lms.service import LmsService
+from .session import LmsSessionStore, SessionStore
 
 
 def configuration() -> dict:
@@ -19,24 +21,29 @@ def configuration() -> dict:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Qalam attendance and grades for any MCP agent.")
+    root = argparse.ArgumentParser(description="NUST Qalam and LMS tools for any MCP agent.")
     sub = root.add_subparsers(dest="command")
     serve = sub.add_parser("serve", help="Start the MCP server (stdio by default).")
     serve.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
-    login = sub.add_parser("login", help="Sign in once; password prompt is hidden.")
+    login = sub.add_parser(
+        "login", help="Sign into Qalam and the LMS once; password prompt is hidden."
+    )
     login.add_argument("--username")
+    login.add_argument("--lms-username", help="Only if the LMS username differs.")
+    login.add_argument("--only", choices=auth.SYSTEMS, help="Sign into one system only.")
     login.add_argument(
-        "--browser", action="store_true", help="Sign in in a visible Chromium window."
+        "--browser", action="store_true", help="Qalam only: sign in in a visible Chromium window."
     )
     login.add_argument(
         "--cdp-url", help="Use an existing Chromium debug endpoint for browser login."
     )
     login.add_argument("--timeout", type=int, default=300)
-    status = sub.add_parser("status", help="Check session validity.")
+    status = sub.add_parser("status", help="Check Qalam and LMS sign-ins.")
     status.add_argument("--offline", action="store_true")
-    sub.add_parser("logout", help="Forget shared local session.")
+    logout = sub.add_parser("logout", help="Forget the shared local sign-ins.")
+    logout.add_argument("--only", choices=auth.SYSTEMS)
     sub.add_parser("config", help="Print local MCP JSON configuration; contains no credentials.")
     token = sub.add_parser(
         "token", help="Create/show the separate secret used for HTTP MCP access."
@@ -48,6 +55,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = parser().parse_args()
     store = SessionStore()
+    lms = LmsService(LmsSessionStore(store.directory))
     try:
         if args.command in (None, "serve"):
             from .server import BearerAuth, create_server
@@ -84,20 +92,23 @@ def main() -> None:
                 from .browser_auth import browser_login
 
                 print(
-                    "Complete Qalam sign-in in the browser. Waiting for your student portal…",
+                    "Complete Qalam sign-in in the browser. Waiting for your student portal… "
+                    "(The LMS is separate: qalam-mcp login --only lms.)",
                     file=sys.stderr,
                 )
                 result = asyncio.run(browser_login(store, args.timeout, args.cdp_url))
             else:
-                username = args.username or input("Qalam username: ")
-                password = getpass.getpass("Qalam password: ")
-                result = QalamClient(store).login(username, password)
+                username = args.username or input("NUST username: ")
+                password = getpass.getpass("NUST password: ")
+                systems = [args.only] if args.only else None
+                result = auth.login(
+                    QalamClient(store), lms, username, password, systems, args.lms_username
+                )
                 password = None
         elif args.command == "status":
-            result = QalamClient(store).status(not args.offline)
+            result = auth.status(QalamClient(store), lms, not args.offline)
         elif args.command == "logout":
-            store.clear()
-            result = {"ok": True, "message": "Shared local session removed."}
+            result = auth.logout(QalamClient(store), lms, [args.only] if args.only else None)
         elif args.command == "config":
             result = configuration()
             if "QALAM_STATE_DIR" in os.environ:
@@ -112,6 +123,8 @@ def main() -> None:
         else:
             return
         print(json.dumps(result, indent=2))
+        if result.get("ok") is False:
+            sys.exit(1)
     except QalamError as exc:
         print(json.dumps(exc.as_dict()), file=sys.stderr)
         sys.exit(1)
@@ -120,7 +133,7 @@ def main() -> None:
         sys.exit(130)
     except OSError:
         print(
-            "Could not access Qalam's local state directory. Check QALAM_STATE_DIR permissions.",
+            "Could not access the local state directory. Check QALAM_STATE_DIR permissions.",
             file=sys.stderr,
         )
         sys.exit(1)

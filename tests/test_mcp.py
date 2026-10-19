@@ -10,33 +10,61 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from qalam_mcp.server import BearerAuth, create_server
 
+LMS_TOOLS = {
+    "lms_list_courses",
+    "lms_deadlines",
+    "lms_notifications",
+    "lms_assignments",
+    "lms_assignment_status",
+    "lms_course_files",
+    "lms_download_file",
+    "lms_submit",
+}
 
-async def test_mcp_discovery_and_academic_calls(client):
-    server = create_server(client)
+
+async def test_mcp_discovery_and_academic_calls(client, lms_service, lms, tmp_path):
+    server = create_server(client, lms=lms_service)
     async with create_connected_server_and_client_session(server) as session:
         discovered = await session.list_tools()
         names = {t.name for t in discovered.tools}
         assert names == {
-            "qalam_auth_status",
-            "qalam_login",
-            "qalam_logout",
+            "nust_auth_status",
+            "nust_login",
+            "nust_logout",
             "qalam_list_courses",
             "qalam_attendance",
             "qalam_grades",
             "qalam_results",
             "qalam_timetable",
+            *LMS_TOOLS,
         }
         grades = await session.call_tool("qalam_grades", {"course": "123", "assessment": "Quiz 2"})
         assert not grades.isError
         assert grades.structuredContent["categories"][0]["assessments"][0]["obtained_marks"] == 8
         attendance = await session.call_tool("qalam_attendance", {"course": "123"})
         assert attendance.structuredContent["courses"][0]["combined"]["percentage"] == 75
-        await session.call_tool("qalam_logout", {})
-        status = await session.call_tool("qalam_auth_status", {})
-        assert status.structuredContent["authenticated"] is False
+        await session.call_tool("nust_logout", {"systems": ["qalam"]})
+        status = await session.call_tool("nust_auth_status", {})
+        assert status.structuredContent["qalam"]["authenticated"] is False
+        assert status.structuredContent["lms"]["authenticated"] is True
         failure = await session.call_tool("qalam_list_courses", {})
         assert failure.isError
         assert "AUTH_REQUIRED" in failure.content[0].text
+        courses = await session.call_tool("lms_list_courses", {})
+        assert courses.structuredContent["courses"][0]["code"] == "CS-101"
+        ambiguous = await session.call_tool("lms_assignment_status", {"assignment": "assign"})
+        assert ambiguous.isError
+        assert "ASSIGNMENT_AMBIGUOUS" in ambiguous.content[0].text
+        tools = {t.name: t for t in discovered.tools}
+        assert tools["lms_course_files"].annotations.readOnlyHint is True
+        assert tools["lms_download_file"].annotations.readOnlyHint is False
+        assert tools["lms_submit"].annotations.destructiveHint is True
+        report = tmp_path / "report.pdf"
+        report.write_bytes(b"synthetic")
+        dry = await session.call_tool("lms_submit", {"assignment": "501", "files": [str(report)]})
+        assert dry.structuredContent["outcome"] == "dry_run"
+        assert dry.structuredContent["plan"]["finalizes"] is True
+        assert "upload" not in lms.calls
 
 
 async def test_real_stdio_subprocess_and_protocol_output(tmp_path):
@@ -48,10 +76,11 @@ async def test_real_stdio_subprocess_and_protocol_output(tmp_path):
     async with stdio_client(params) as (reader, writer):
         async with ClientSession(reader, writer) as session:
             await session.initialize()
-            assert len((await session.list_tools()).tools) == 8
-            status = await session.call_tool("qalam_auth_status", {"check_online": False})
+            assert len((await session.list_tools()).tools) == 16
+            status = await session.call_tool("nust_auth_status", {"check_online": False})
             assert not status.isError
-            assert status.structuredContent["authenticated"] is False
+            assert status.structuredContent["qalam"]["authenticated"] is False
+            assert status.structuredContent["lms"]["authenticated"] is False
 
 
 async def test_http_bearer_gate_and_initialize(client):
@@ -85,7 +114,7 @@ async def test_http_bearer_gate_and_initialize(client):
                 },
             )
             assert response.status_code == 200
-            assert json.loads(response.text)["result"]["serverInfo"]["name"] == "Qalam"
+            assert json.loads(response.text)["result"]["serverInfo"]["name"] == "NUST Qalam + LMS"
             blocked = await http.post(
                 "http://evil.test/mcp",
                 headers={

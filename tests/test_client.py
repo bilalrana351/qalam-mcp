@@ -129,3 +129,31 @@ def test_permissions_and_expiring_cookie_roundtrip(store):
     assert "password" not in json.dumps(store.load())
     store.clear()
     assert store.load() is None
+
+
+def test_feedback_gate_keeps_session_and_is_reported(store):
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(
+                303,
+                headers={
+                    "Location": "/student/dashboard",
+                    "Set-Cookie": "session_id=gated-session; Secure; Path=/",
+                },
+            )
+        if request.url.path == "/web/login":
+            return httpx.Response(200, text=LOGIN)
+        if request.url.path == "/student/qa/feedback":
+            pytest.fail("Feedback page must never be opened")
+        return httpx.Response(303, headers={"Location": "/student/qa/feedback"})
+
+    client = QalamClient(store, httpx.MockTransport(handler))
+    result = client.login("fixture-user", "fixture-password")
+    assert result["authenticated"] is True
+    assert "/student/qa/feedback" in result["action_required"]
+    assert "gated-session" in (store.directory / "session.json").read_text()
+    status = client.status()
+    assert status["authenticated"] is True and "action_required" in status
+    with pytest.raises(QalamError) as caught:
+        client.list_courses()
+    assert caught.value.code == "FEEDBACK_REQUIRED"
