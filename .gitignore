@@ -14,7 +14,12 @@ wheels/
 .env.*
 !.env.example
 session.json
+session.lock
+lms-session.json
+lms-session.lock
 access-token
+# Interrupted atomic writes can contain session cookies or tokens.
+.write-*
 .pytest_cache/
 .ruff_cache/
 examples/mcp.this-machine.json
