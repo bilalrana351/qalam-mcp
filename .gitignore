@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Sessions and credentials must stay outside the source tree.
+.env
+.env.*
+!.env.example
+session.json
+access-token
+.pytest_cache/
+.ruff_cache/
+examples/mcp.this-machine.json

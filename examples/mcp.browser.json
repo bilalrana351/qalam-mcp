@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "qalam": {
+      "command": "uv",
+      "args": ["--directory", "/ABSOLUTE/PATH/TO/qalam-mcp", "run", "--frozen", "qalam-mcp", "serve"],
+      "env": {"QALAM_CDP_URL": "http://127.0.0.1:9222"}
+    }
+  }
+}

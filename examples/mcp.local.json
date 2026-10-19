@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "qalam": {
+      "command": "uv",
+      "args": ["--directory", "/ABSOLUTE/PATH/TO/qalam-mcp", "run", "--frozen", "qalam-mcp", "serve"]
+    }
+  }
+}
