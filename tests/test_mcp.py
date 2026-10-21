@@ -128,3 +128,33 @@ async def test_http_bearer_gate_and_initialize(client):
 def test_http_rejects_short_token():
     with pytest.raises(ValueError, match="32"):
         BearerAuth(None, "short")
+
+
+async def test_mcp_remember_is_explicit_and_logout_forgets_credentials(
+    store, fixtures, lms_service
+):
+    from test_reauthentication import Portal
+
+    from qalam_mcp.client import QalamClient
+
+    portal = Portal(fixtures)
+    client = QalamClient(store, httpx.MockTransport(portal))
+    server = create_server(client, lms=lms_service)
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "nust_login",
+            {
+                "username": "synthetic-user",
+                "password": "synthetic-password",
+                "systems": ["qalam"],
+                "remember_qalam": True,
+            },
+        )
+        assert not result.isError
+        assert result.structuredContent["qalam"]["auto_login_enabled"]
+        assert "synthetic-password" not in str(result)
+        portal.expired = True
+        courses = await session.call_tool("qalam_list_courses", {})
+        assert not courses.isError and portal.posts == 2
+        await session.call_tool("nust_logout", {"systems": ["qalam"]})
+        assert client.credentials.read() is None and store.load() is None

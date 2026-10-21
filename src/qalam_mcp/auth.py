@@ -35,20 +35,17 @@ def login(
     password: str,
     systems: list[str] | None = None,
     lms_username: str | None = None,
+    remember_qalam: bool = False,
 ) -> dict:
     actions = {
-        "qalam": lambda: qalam.login(username, password),
+        "qalam": lambda: qalam.login(username, password, remember=remember_qalam),
         "lms": lambda: lms.login(lms_username or username, password),
     }
     return each({name: actions[name] for name in chosen(systems)})
 
 
 def logout(qalam: QalamClient, lms: LmsService, systems: list[str] | None = None) -> dict:
-    def qalam_logout() -> dict:
-        qalam.store.clear()
-        return {"ok": True, "authenticated": False, "message": "Local Qalam session removed."}
-
-    actions = {"qalam": qalam_logout, "lms": lms.logout}
+    actions = {"qalam": qalam.logout, "lms": lms.logout}
     return each({name: actions[name] for name in chosen(systems)})
 
 

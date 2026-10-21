@@ -15,6 +15,7 @@ wheels/
 !.env.example
 session.json
 session.lock
+qalam-credentials.json
 lms-session.json
 lms-session.lock
 access-token

@@ -94,7 +94,7 @@ def test_cli_login_prompts_once_for_both(monkeypatch, tmp_path, capsys):
     prompts, seen = [], {}
     monkeypatch.setattr(cli.getpass, "getpass", lambda p: prompts.append(p) or "pw")
 
-    def fake_login(qalam, lms, username, password, systems, lms_username):
+    def fake_login(qalam, lms, username, password, systems, lms_username, remember_qalam=False):
         seen.update(username=username, password=password, systems=systems)
         return {"ok": True}
 
@@ -102,3 +102,31 @@ def test_cli_login_prompts_once_for_both(monkeypatch, tmp_path, capsys):
     cli.main()
     assert prompts == ["NUST password: "]
     assert seen == {"username": "fixture-user", "password": "pw", "systems": None}
+
+
+def test_cli_remember_is_explicit_and_forwarded(monkeypatch, tmp_path):
+    monkeypatch.setenv("QALAM_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["qalam-mcp", "login", "--username", "fixture-user", "--only", "qalam", "--remember-qalam"],
+    )
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _: "fixture-password")
+    seen = {}
+
+    def fake_login(qalam, lms, username, password, systems, lms_username, remember_qalam=False):
+        seen.update(systems=systems, remember=remember_qalam)
+        return {"ok": True}
+
+    monkeypatch.setattr(cli.auth, "login", fake_login)
+    cli.main()
+    assert seen == {"systems": ["qalam"], "remember": True}
+
+
+@pytest.mark.parametrize("option", ["--browser", "--cdp-url=http://localhost:9222", "--only=lms"])
+def test_cli_rejects_incompatible_remember_options(monkeypatch, tmp_path, option):
+    monkeypatch.setenv("QALAM_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("sys.argv", ["qalam-mcp", "login", "--remember-qalam", option])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _: pytest.fail("Must not prompt"))
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+    assert caught.value.code == 1
