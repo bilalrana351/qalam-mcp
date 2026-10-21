@@ -28,6 +28,10 @@ def page_state(html: str) -> str:
     doc = soup(html)
     title = text(doc.title).lower()
     body = text(doc).lower()
+    if "cloudflare" in title and (
+        "attention required" in title or "sorry, you have been blocked" in body
+    ):
+        return "blocked"
     if (
         "just a moment" in title
         or "cf-chl" in html

@@ -7,8 +7,8 @@ such as Claude, Cursor or Codex, to Qalam and the NUST LMS.
 - The LMS gives you deadlines, assignments, course files and notifications, and lets you
   submit work.
 
-Qalam and the LMS use the same NUST password, so you sign in once and both work. The
-password is never saved.
+Qalam and the LMS use the same NUST password, so you sign in once and both work. By
+default the password is never saved. You can opt into automatic Qalam re-login below.
 
 > Unofficial personal project, not affiliated with NUST. If either portal changes, parts
 > of this can break.
@@ -117,15 +117,16 @@ allow. If the LMS already has the same files, the server says so and does nothin
 
 ## Where your login is stored
 
-- The server never saves your password. It keeps only the session that signing in produces.
+- By default the server keeps only the session that signing in produces.
 - Sessions live in your user data folder, not in the project. That's
   `~/.local/share/qalam-mcp` on Linux and the usual app-data folder on macOS and Windows.
   Set `QALAM_STATE_DIR` to use a different folder.
 - The files are readable only by you. They aren't encrypted, though, and anyone who can
   read them can act as you on Qalam and the LMS.
-- A sign-in lasts until Qalam or the LMS expires it. When that happens, tools return
-  `AUTH_REQUIRED` and you run `login` again.
-- `logout` deletes the local files. It doesn't sign you out on NUST's side.
+- A sign-in lasts until Qalam or the LMS expires it. Without automatic Qalam re-login,
+  tools return `AUTH_REQUIRED` and you run `login` again.
+- `logout` deletes the local sessions and remembered Qalam credentials. It doesn't sign
+  you out on NUST's side.
 
 Every agent on the same machine shares one sign-in, so this is meant for one person's
 account. For a second account, use a separate `QALAM_STATE_DIR`.
@@ -138,7 +139,50 @@ uv run qalam-mcp logout
 
 If your LMS username is different from your Qalam one, add `--lms-username`.
 
+### Automatic Qalam re-login (optional)
+
+If Qalam frequently expires your session, enable automatic re-login explicitly:
+
+```bash
+uv run qalam-mcp login --only qalam --remember-qalam
+```
+
+This saves your Qalam username and **plaintext password, without encryption**, in
+`qalam-credentials.json` in the private state folder outside the project. On POSIX the
+folder is `0700` and the file is `0600`; only your OS user can read it. Anyone with access
+to your OS account or its backups can still read the password. It is never included in
+tool results, logs, session cookies, or MCP configuration. Default login remains
+password-free on disk. An agent may use `nust_login(..., remember_qalam=True)` only after
+you explicitly ask it to remember your credentials.
+
+On a missing or expired session, the next Qalam read signs in and retries that read once.
+A shared lock prevents simultaneous agents from repeating the login. A failed automatic
+login waits five minutes before another attempt; a rejected password removes the stored
+credentials so later reads cannot repeatedly submit a bad password. Explicit login can
+be retried immediately. Nothing retries an LMS submission or any other write.
+
+The opt-in persists even if Cloudflare or a network error prevents the initial login, so
+you do not need to provide credentials again once access is restored. Saving credentials
+does **not** mean that sign-in succeeded; the login still returns its access error. Check
+`status --offline` for `auto_login_enabled` without contacting Qalam.
+
+This works with direct HTTPS access to Qalam. Cloudflare challenges, access blocks,
+pending feedback and an attached browser's expired login still require user action.
+The server does not retry passwords for those conditions. To disable automatic re-login,
+run `logout --only qalam`, or sign in successfully without `--remember-qalam`. Successful
+interactive browser login also removes previously remembered credentials.
+
 ## Troubleshooting
+
+**"PORTAL_BLOCKED".** Cloudflare blocked this machine before Qalam could check the login.
+This differs from an expired session or an interactive verification challenge. Repeated
+password attempts will not fix it. Open Qalam in a browser on your own network; if access
+is still blocked, contact Qalam support. The server keeps your existing session and any
+remembered credentials.
+
+**"AUTO_LOGIN_DEFERRED".** An automatic login recently failed. Wait five minutes or run
+an explicit login after resolving the reported problem. A plain HTTP 403 returns
+`ACCESS_DENIED` and does not automatically trigger another login.
 
 **"FEEDBACK_REQUIRED".** Qalam hides every student page until you fill in the pending QA
 feedback forms. Do them in your browser at
@@ -236,6 +280,8 @@ The tests run against fake Qalam pages and a fake Moodle server, so you don't ne
 real account to run them. They cover expired sessions, failed logins, file permissions, redirect
 safety, attendance and marks parsing, the whole submit flow (plans, refusals, late work,
 verification and dropped connections), and real MCP traffic over stdio and HTTP.
+Qalam renewal tests also cover concurrent agents, bounded retries, login failure cooldowns,
+credential rejection, account isolation and logout removing automatic-login credentials.
 
 ## Credits
 

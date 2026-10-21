@@ -40,6 +40,12 @@ def parser() -> argparse.ArgumentParser:
         "--cdp-url", help="Use an existing Chromium debug endpoint for browser login."
     )
     login.add_argument("--timeout", type=int, default=300)
+    login.add_argument(
+        "--remember-qalam",
+        action="store_true",
+        help="Opt in to automatic Qalam re-login. Saves the password in a private local "
+        "0600 file, without encryption. Direct HTTPS only; logout removes it.",
+    )
     status = sub.add_parser("status", help="Check Qalam and LMS sign-ins.")
     status.add_argument("--offline", action="store_true")
     logout = sub.add_parser("logout", help="Forget the shared local sign-ins.")
@@ -88,6 +94,8 @@ def main() -> None:
                 )
             return
         if args.command == "login":
+            if args.remember_qalam and (args.browser or args.cdp_url or args.only == "lms"):
+                raise QalamError("INVALID_OPTIONS", "--remember-qalam requires direct Qalam login.")
             if args.browser or args.cdp_url:
                 from .browser_auth import browser_login
 
@@ -102,7 +110,13 @@ def main() -> None:
                 password = getpass.getpass("NUST password: ")
                 systems = [args.only] if args.only else None
                 result = auth.login(
-                    QalamClient(store), lms, username, password, systems, args.lms_username
+                    QalamClient(store),
+                    lms,
+                    username,
+                    password,
+                    systems,
+                    args.lms_username,
+                    remember_qalam=args.remember_qalam,
                 )
                 password = None
         elif args.command == "status":

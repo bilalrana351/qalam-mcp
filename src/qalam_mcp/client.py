@@ -2,6 +2,7 @@
 
 import os
 import re
+import time
 from datetime import UTC, datetime
 from http.cookiejar import Cookie
 from urllib.parse import urljoin, urlsplit
@@ -10,7 +11,7 @@ import httpx
 
 from . import parsers
 from .errors import QalamError
-from .session import HOST, ORIGIN, SessionStore
+from .session import HOST, ORIGIN, QalamCredentials, SessionStore
 
 
 def now() -> str:
@@ -97,6 +98,7 @@ class QalamClient:
         self.store = store or SessionStore()
         self.transport = transport
         self.cdp_url = cdp_url or os.environ.get("QALAM_CDP_URL")
+        self.credentials = QalamCredentials(self.store.directory)
 
     def _http(self, state: dict | None = None) -> httpx.Client:
         state = state or {}
@@ -131,16 +133,29 @@ class QalamClient:
                         "LOGIN_REDIRECT", "Unexpected login redirect. Use browser login."
                     )
                 continue
-            if parsers.page_state(response.text) == "challenge":
+            page_state = parsers.page_state(response.text)
+            if page_state == "blocked":
+                raise QalamError(
+                    "PORTAL_BLOCKED",
+                    "Cloudflare blocked access to Qalam before credentials could be checked. "
+                    "Repeated password logins will not fix this. Try Qalam in a browser on "
+                    "your own network; if it is also blocked, contact Qalam support. "
+                    "The saved session and credentials have been retained.",
+                )
+            if page_state == "challenge":
                 raise QalamError(
                     "BROWSER_LOGIN_REQUIRED",
                     "Qalam requires browser verification. Run qalam-mcp login --browser on a "
                     "machine with a desktop, complete verification and sign in. Session cookies "
                     "are reused across agents on that machine. Verification may be required again.",
                 )
-            if response.status_code in (401, 403):
+            if response.status_code == 401:
+                raise QalamError("AUTH_REQUIRED", "Qalam requires a new sign-in.")
+            if response.status_code == 403:
                 raise QalamError(
-                    "ACCESS_DENIED", "Qalam denied this request. Try signing in again."
+                    "ACCESS_DENIED",
+                    "Qalam denied access (HTTP 403). This does not establish that your "
+                    "session expired. Check access in a browser before retrying login.",
                 )
             if response.status_code >= 400:
                 raise QalamError("PORTAL_ERROR", f"Qalam returned HTTP {response.status_code}.")
@@ -156,7 +171,7 @@ class QalamClient:
             raise QalamError(
                 "AUTH_REQUIRED",
                 "Your Qalam session expired. Run qalam-mcp login, or ask the user "
-                "for credentials and call nust_login. Passwords are not saved.",
+                "for credentials and call nust_login.",
             )
         if not parsers.is_student_page(response.text):
             raise QalamError(
@@ -166,39 +181,75 @@ class QalamClient:
     def _get(self, path: str) -> str:
         with self.store.locked():
             state = self.store.load()
-            if not state:
-                raise QalamError(
-                    "AUTH_REQUIRED",
-                    "Sign in once using qalam-mcp login, or ask the user for "
-                    "credentials and call nust_login. All agents share the saved session.",
-                )
-            if self.cdp_url:
-                from .browser_auth import browser_read
-
-                html, cookies, agent = browser_read(self.cdp_url, path)
-                state["cookies"], state["user_agent"] = cookies, agent
-                self.store.write(state)
+            try:
+                return self._read(path, state)
+            except QalamError as exc:
+                if exc.code != "AUTH_REQUIRED" or self.cdp_url:
+                    raise
+                credentials = self.credentials.read()
+                if not credentials:
+                    raise
+                if state and state.get("username") != credentials["username"]:
+                    raise QalamError(
+                        "AUTH_REQUIRED",
+                        "Saved session and auto-login account differ. Sign in again.",
+                    ) from None
+                if credentials.get("retry_after", 0) > time.time():
+                    raise QalamError(
+                        "AUTO_LOGIN_DEFERRED",
+                        "Automatic Qalam login recently failed. Wait five minutes or sign in "
+                        "explicitly. Browser verification and access blocks require user action.",
+                    ) from None
+                self.credentials.defer(credentials)
+                try:
+                    self._login(credentials["username"], credentials["password"])
+                except QalamError as login_error:
+                    if login_error.code == "LOGIN_FAILED":
+                        self.credentials.forget()
+                    raise
+                # A protected GET is replayed once, under the same cross-process lock.
+                html = self._read(path, self.store.load())
+                self.credentials.save(credentials["username"], credentials["password"])
                 return html
-            with self._http(state) as client:
-                response = self._request(client, path)
-                self._require_student(response)
-                state["cookies"] = cookie_state(client.cookies)
-                self.store.write(state)
-                return response.text
+
+    def _read(self, path: str, state: dict | None) -> str:
+        if not state:
+            raise QalamError(
+                "AUTH_REQUIRED",
+                "Sign in once using qalam-mcp login, or ask the user for "
+                "credentials and call nust_login. All agents share the saved session.",
+            )
+        if self.cdp_url:
+            from .browser_auth import browser_read
+
+            html, cookies, agent = browser_read(self.cdp_url, path)
+            state["cookies"], state["user_agent"] = cookies, agent
+            self.store.write(state)
+            return html
+        with self._http(state) as client:
+            response = self._request(client, path)
+            self._require_student(response)
+            state["cookies"] = cookie_state(client.cookies)
+            self.store.write(state)
+            return response.text
 
     def status(self, check_online: bool = True) -> dict:
         with self.store.locked():
             state = self.store.load()
-        if not state:
+            auto_login = self.credentials.read() is not None
+        if not state and (not check_online or not auto_login):
             return {
                 "ok": True,
                 "authenticated": False,
+                "auto_login_enabled": auto_login,
                 "reason": "No saved session.",
                 "next_step": "Run qalam-mcp login, or call nust_login with user credentials.",
             }
+        state = state or {}
         result = {
             "ok": True,
-            "session_saved": True,
+            "session_saved": bool(state),
+            "auto_login_enabled": auto_login,
             "username": state.get("username"),
             "authenticated_at": state.get("authenticated_at"),
         }
@@ -206,6 +257,13 @@ class QalamClient:
             try:
                 self._get("/student/dashboard")
                 result["authenticated"] = True
+                with self.store.locked():
+                    renewed = self.store.load() or {}
+                result.update(
+                    session_saved=bool(renewed),
+                    username=renewed.get("username"),
+                    authenticated_at=renewed.get("authenticated_at"),
+                )
             except QalamError as exc:
                 if exc.code == "FEEDBACK_REQUIRED":
                     result.update(authenticated=True, action_required=str(exc))
@@ -217,53 +275,80 @@ class QalamClient:
             result.update(authenticated=None, note="Saved session exists; validity not checked.")
         return result
 
-    def login(self, username: str, password: str) -> dict:
+    def login(self, username: str, password: str, remember: bool = False) -> dict:
         if not username.strip() or not password:
             raise QalamError("INVALID_CREDENTIALS", "A username and password are required.")
         with self.store.locked():
-            with self._http() as client:
-                response = self._request(client, "/web/login")
-                doc = parsers.soup(response.text)
-                field = doc.select_one('input[name="csrf_token"]')
-                if not field or not field.get("value"):
-                    raise QalamError(
-                        "PORTAL_CHANGED", "Login CSRF token not found. Use browser login."
-                    )
-                blocked = None
-                try:
-                    # Fixed destination keeps credentials away from page-supplied form actions.
-                    response = self._request(
-                        client,
-                        "/web/login",
-                        method="POST",
-                        data={
-                            "csrf_token": field["value"],
-                            "login": username.strip(),
-                            "password": password,
-                            "redirect": "/student/dashboard",
-                        },
-                    )
-                    if parsers.page_state(response.text) == "login":
-                        raise QalamError(
-                            "LOGIN_FAILED",
-                            "Qalam did not accept the login, or requires another authentication "
-                            "step. Check credentials or use qalam-mcp login --browser.",
-                        )
-                    response = self._request(client, "/student/dashboard")
-                    self._require_student(response)
-                except QalamError as exc:
-                    # The feedback gate is only reachable with accepted credentials.
-                    if exc.code != "FEEDBACK_REQUIRED":
-                        raise
-                    blocked = exc
-                self.store.write(
-                    {
-                        "cookies": cookie_state(client.cookies),
-                        "username": username.strip(),
-                        "authenticated_at": now(),
-                        "user_agent": client.headers["User-Agent"],
-                    }
+            if remember and self.cdp_url:
+                raise QalamError(
+                    "AUTO_LOGIN_UNSUPPORTED",
+                    "Automatic password login supports direct HTTPS only. Sign into the "
+                    "attached browser interactively, or remove QALAM_CDP_URL first.",
                 )
+            if remember:
+                # Explicit opt-in persists even if Cloudflare currently blocks login.
+                self.credentials.save(username.strip(), password, time.time() + 300)
+            try:
+                result = self._login(username.strip(), password)
+            except QalamError as exc:
+                if remember and exc.code == "LOGIN_FAILED":
+                    self.credentials.forget()
+                raise
+            if remember:
+                self.credentials.save(username.strip(), password)
+            else:
+                self.credentials.forget()
+            return {**result, "auto_login_enabled": remember}
+
+    def logout(self) -> dict:
+        with self.store.locked():
+            (self.store.directory / self.store.filename).unlink(missing_ok=True)
+            self.credentials.forget()
+        return {"ok": True, "authenticated": False, "message": "Local Qalam login removed."}
+
+    def _login(self, username: str, password: str) -> dict:
+        """Called only while holding the shared session lock; never stores a password."""
+        with self._http() as client:
+            response = self._request(client, "/web/login")
+            doc = parsers.soup(response.text)
+            field = doc.select_one('input[name="csrf_token"]')
+            if not field or not field.get("value"):
+                raise QalamError("PORTAL_CHANGED", "Login CSRF token not found. Use browser login.")
+            blocked = None
+            try:
+                # Fixed destination keeps credentials away from page-supplied form actions.
+                response = self._request(
+                    client,
+                    "/web/login",
+                    method="POST",
+                    data={
+                        "csrf_token": field["value"],
+                        "login": username.strip(),
+                        "password": password,
+                        "redirect": "/student/dashboard",
+                    },
+                )
+                if parsers.page_state(response.text) == "login":
+                    raise QalamError(
+                        "LOGIN_FAILED",
+                        "Qalam did not accept the login, or requires another authentication "
+                        "step. Check credentials or use qalam-mcp login --browser.",
+                    )
+                response = self._request(client, "/student/dashboard")
+                self._require_student(response)
+            except QalamError as exc:
+                # The feedback gate is only reachable with accepted credentials.
+                if exc.code != "FEEDBACK_REQUIRED":
+                    raise
+                blocked = exc
+            self.store.write(
+                {
+                    "cookies": cookie_state(client.cookies),
+                    "username": username.strip(),
+                    "authenticated_at": now(),
+                    "user_agent": client.headers["User-Agent"],
+                }
+            )
         if blocked:
             return {
                 "ok": True,

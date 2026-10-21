@@ -42,3 +42,13 @@ def test_attached_browser_detects_expired_login(monkeypatch, fixtures):
         browser_read("http://127.0.0.1:9222", "/student/dashboard")
     assert caught.value.code == "AUTH_REQUIRED"
     page.close.assert_called_once()
+
+
+def test_attached_browser_identifies_cloudflare_access_block(monkeypatch, fixtures):
+    _, page = attached_browser(monkeypatch, fixtures)
+    page.content.return_value = "<title>Attention Required! | Cloudflare</title>"
+    page.goto.return_value.status = 403
+    with pytest.raises(QalamError) as caught:
+        browser_read("http://127.0.0.1:9222", "/student/dashboard")
+    assert caught.value.code == "PORTAL_BLOCKED"
+    page.close.assert_called_once()

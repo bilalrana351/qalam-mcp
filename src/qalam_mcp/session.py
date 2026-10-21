@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -130,3 +131,56 @@ class LmsSessionStore(PrivateStore):
         }
         with self.locked():
             self.write_private(self.filename, json.dumps(data))
+
+
+class QalamCredentials(PrivateStore):
+    """Opt-in plaintext credentials, protected like cookies. Use the Qalam session lock.
+
+    Kept separate from session.json so existing session consumers never receive passwords.
+    """
+
+    filename = "qalam-credentials.json"
+    lockname = "session.lock"
+    label = "Qalam auto-login"
+
+    def valid(self, value: dict) -> bool:
+        return (
+            isinstance(value.get("username"), str)
+            and bool(value["username"].strip())
+            and isinstance(value.get("password"), str)
+            and bool(value["password"])
+            and isinstance(value.get("retry_after", 0), (int, float))
+        )
+
+    def read(self) -> dict | None:
+        path = self.directory / self.filename
+        if path.is_symlink():
+            raise QalamError("CREDENTIALS_UNSAFE", "Auto-login credentials must not be a symlink.")
+        if path.exists() and os.name == "posix":
+            info = path.stat()
+            if info.st_mode & 0o077 or info.st_uid != os.getuid():
+                raise QalamError(
+                    "CREDENTIALS_UNSAFE",
+                    "Auto-login credentials must be owned by you with permissions 0600.",
+                )
+        return super().read()
+
+    def save(self, username: str, password: str, retry_after: float = 0) -> None:
+        self.write_private(
+            self.filename,
+            json.dumps(
+                {
+                    "version": 1,
+                    "username": username,
+                    "password": password,
+                    "retry_after": retry_after,
+                }
+            ),
+        )
+
+    def defer(self, credentials: dict) -> None:
+        # Shared between processes; a burst of reads must not hammer a failed login.
+        self.save(credentials["username"], credentials["password"], time.time() + 300)
+
+    def forget(self) -> None:
+        (self.directory / self.filename).unlink(missing_ok=True)

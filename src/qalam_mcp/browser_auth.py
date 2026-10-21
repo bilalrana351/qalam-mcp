@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 from . import parsers
 from .client import now
 from .errors import QalamError
-from .session import HOST, ORIGIN, SessionStore
+from .session import HOST, ORIGIN, QalamCredentials, SessionStore
 
 
 def browser_read(cdp_url: str, path: str) -> tuple[str, list[dict], str]:
@@ -46,6 +46,12 @@ def browser_read(cdp_url: str, path: str) -> tuple[str, list[dict], str]:
             try:
                 response = page.goto(ORIGIN + path, wait_until="domcontentloaded", timeout=30000)
                 html = page.content()
+                if parsers.page_state(html) == "blocked":
+                    raise QalamError(
+                        "PORTAL_BLOCKED",
+                        "Cloudflare blocked Qalam in the browser. Try your own network or "
+                        "contact Qalam support. Repeated password logins will not fix this.",
+                    )
                 if parsers.page_state(html) == "challenge":
                     raise QalamError(
                         "BROWSER_LOGIN_REQUIRED",
@@ -102,8 +108,14 @@ async def browser_login(
                             "LOGIN_CANCELLED", "Browser login was closed before completion."
                         )
                     url = page.url
+                    html = await page.content()
+                    if parsers.page_state(html) == "blocked":
+                        raise QalamError(
+                            "PORTAL_BLOCKED",
+                            "Cloudflare blocked Qalam in the browser. Try your own network "
+                            "or contact Qalam support; credentials have not been checked.",
+                        )
                     if url.startswith(ORIGIN + "/student/"):
-                        html = await page.content()
                         if parsers.page_state(html) == "content" and parsers.is_student_page(html):
                             cookies = await context.cookies(ORIGIN)
                             # Retain browser cookie attributes supported by the HTTP client.
@@ -121,6 +133,7 @@ async def browser_login(
                                         "authenticated_at": now(),
                                     }
                                 )
+                                QalamCredentials(store.directory).forget()
                             return {
                                 "ok": True,
                                 "authenticated": True,
